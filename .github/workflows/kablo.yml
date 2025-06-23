@@ -1,4 +1,5 @@
-name: kablo.yml
+name: Kablo M3U Güncelleme
+
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
