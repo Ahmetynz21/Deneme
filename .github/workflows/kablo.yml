@@ -1,6 +1,5 @@
 name: Kablo M3U Güncelleme
 
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -8,7 +7,7 @@ concurrency:
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */1 * * *'  # Her 1 saatte bir çalışır
+    - cron: '0 */3 * * *'  # Her 3 saatte bir çalışır
 
 jobs:
   KabloGuncelle:
@@ -33,7 +32,7 @@ jobs:
           pip install -U setuptools wheel Kekik httpx parsel requests
 
       - name: API'den M3U Listesini Al
-        run:  kablo.py  
+        run: python kablo.py  
 
 
 
