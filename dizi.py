@@ -324,3 +324,413 @@ async def test_m3u8_url(session, url, timeout=15):
 
             except UnicodeDecodeError:
                 logger.info(f"[DEBUG] Unicode decode hatası - muhtemelen binary content")
+
+                return False
+
+    except asyncio.TimeoutError:
+        logger.info(f"[DEBUG] Timeout: {url}")
+        return False
+    except Exception as e:
+        logger.warning(f"[DEBUG] Test hatası: {e}")
+        return False
+
+async def get_series_from_page(session, page_num):
+    """Belirli bir sayfadan dizi listesini alır"""
+    diziler_url = f"{BASE_URL}/diziler?p={page_num}"
+    logger.info(f"Sayfa {page_num} alınıyor: {diziler_url}")
+
+    content = await fetch_page(session, diziler_url)
+    if not content:
+        logger.warning(f"[!] Sayfa {page_num} alınamadı.")
+        return [], False
+
+    soup = BeautifulSoup(content, 'html.parser')
+
+
+    series_links = []
+    link_elements = soup.select("a.uk-position-cover[href*='/dizi/']")
+
+
+    for element in link_elements:
+        href = element.get("href")
+        if href:
+            full_url = fix_url(href)
+            if full_url and full_url not in series_links:
+                series_links.append(full_url)
+
+
+    has_next_page = False
+
+
+    pagination_selectors = [
+        ".uk-pagination .uk-pagination-next",
+        ".pagination .next",
+        "a[href*='?p=']",
+        ".uk-pagination a"
+    ]
+
+    for selector in pagination_selectors:
+        pagination_elements = soup.select(selector)
+        for element in pagination_elements:
+            href = element.get("href", "")
+            if href and f"?p={page_num + 1}" in href:
+                has_next_page = True
+                break
+        if has_next_page:
+            break
+
+
+    if not has_next_page and series_links:
+        next_page_url = f"{BASE_URL}/diziler?p={page_num + 1}"
+        next_content = await fetch_page(session, next_page_url)
+        if next_content:
+            next_soup = BeautifulSoup(next_content, 'html.parser')
+            next_links = next_soup.select(".uk-grid .uk-width-large-1-6 a.uk-position-cover")
+            if next_links:
+                has_next_page = True
+
+    logger.info(f"[+] Sayfa {page_num}: {len(series_links)} dizi linki toplandı. Sonraki sayfa: {'Var' if has_next_page else 'Yok'}")
+    return series_links, has_next_page
+
+async def get_series_from_homepage():
+    """Tüm sayfalardan dizi listesini alır"""
+    async with aiohttp.ClientSession() as session:
+        all_series_links = []
+        page_num = 1
+        max_pages = 100  
+
+        while page_num <= max_pages:
+            series_links, has_next_page = await get_series_from_page(session, page_num)
+
+            if not series_links:
+                logger.info(f"[!] Sayfa {page_num} boş, tarama durduruluyor.")
+                break
+
+
+            new_count = 0
+            for link in series_links:
+                if link not in all_series_links:
+                    all_series_links.append(link)
+                    new_count += 1
+
+            logger.info(f"[+] Sayfa {page_num}: {new_count} yeni dizi eklendi. Toplam: {len(all_series_links)}")
+
+            if not has_next_page:
+                logger.info(f"[✓] Son sayfa ({page_num}) işlendi.")
+                break
+
+            page_num += 1
+
+
+            await asyncio.sleep(0.5)
+
+        logger.info(f"[✓] Toplam {len(all_series_links)} benzersiz dizi linki toplandı ({page_num} sayfa tarandı).")
+        return all_series_links
+
+async def get_series_metadata(session, series_url):
+    """Dizi meta verilerini alır"""
+    content = await fetch_page(session, series_url)
+    if not content:
+        return "Bilinmeyen Dizi", ""
+
+    soup = BeautifulSoup(content, 'html.parser')
+
+
+    title_element = soup.select_one(".text-bold")
+    title = title_element.get_text(strip=True) if title_element else "Bilinmeyen Dizi"
+
+
+    logo_url = ""
+    logo_element = soup.select_one(".media-cover img")
+    if logo_element:
+        logo_url = logo_element.get("src") or ""
+
+    logo_url = fix_url(logo_url)
+
+    return title, logo_url
+
+async def get_episode_links(session, series_url):
+    """Dizi sayfasından bölüm linklerini alır"""
+    content = await fetch_page(session, series_url)
+    if not content:
+        return []
+
+    soup = BeautifulSoup(content, 'html.parser')
+    episode_links = []
+
+
+    season_buttons = soup.select(".season-menu .season-btn")
+
+    if season_buttons:
+        logger.info(f"[+] {len(season_buttons)} sezon bulundu.")
+
+
+        for button in season_buttons:
+            season_text = button.get_text(strip=True)
+
+
+            season_num = "".join(filter(str.isdigit, season_text))
+            if not season_num:
+                button_id = button.get("id", "")
+                if button_id:
+                    season_num = str(button_id).split("-")[-1]
+                else:
+                    continue
+
+
+            season_detail_id = f"season-{season_num}"
+            season_detail = soup.select_one(f"#{season_detail_id}")
+
+            if season_detail:
+                episode_elements = season_detail.select(".uk-width-large-1-5 a")
+
+                for ep_element in episode_elements:
+                    href = ep_element.get("href")
+                    if href:
+                        if isinstance(href, str) and href.startswith("?"):
+                            full_url = f"{series_url}{href}"
+                        else:
+                            full_url = fix_url(href)
+
+                        if full_url and full_url != series_url and full_url not in [e[0] for e in episode_links]:
+                            episode_links.append((full_url, int(season_num)))
+    else:
+
+        logger.info("Sezon butonu yok, fallback seçiciler kullanılıyor.")
+        selectors = [
+            ".bolumler .bolumtitle a", 
+            ".episodes-list .episode a", 
+            ".episode-item a", 
+            "#season1 .uk-width-large-1-5 a"
+        ]
+
+        for selector in selectors:
+            episode_elements = soup.select(selector)
+
+            for ep_element in episode_elements:
+                href = ep_element.get("href")
+                if href:
+                    if isinstance(href, str) and href.startswith("?"):
+                        full_url = f"{series_url}{href}"
+                    else:
+                        full_url = fix_url(href)
+
+                    if full_url and full_url != series_url and full_url not in [e[0] for e in episode_links]:
+
+                        season_match = re.search(r'sezon[=-]?(\d+)', full_url, re.IGNORECASE)
+                        season_num = int(season_match.group(1)) if season_match else 1
+                        episode_links.append((full_url, season_num))
+
+
+    normalized_episodes = normalize_episode_numbers(episode_links)
+
+    logger.info(f"[+] Toplam {len(normalized_episodes)} bölüm bulundu ve normalize edildi.")
+    return normalized_episodes
+
+async def extract_m3u8_from_episode(session, episode_url, season_num, episode_num):
+    """Bölüm sayfasından m3u8 linkini çıkarır - YENİ SİSTEM (Gujan + Playhouse + Proxy)"""
+    content = await fetch_page(session, episode_url)
+    if not content:
+        return None, None, None
+
+    soup = BeautifulSoup(content, 'html.parser')
+
+
+    title_element = soup.select_one("title")
+    episode_name = title_element.get_text(strip=True) if title_element else "Bilinmeyen Bölüm"
+
+    logger.info(f"[*] İşleniyor: Sezon {season_num}, Bölüm {episode_num}")
+
+    m3u8_url = None
+
+    try:
+
+        gujan_iframe_selectors = [
+            'iframe[title="dizifunplay"]',
+            'iframe[id="altPlayerFrame"]',
+            'iframe[src*="gujan.premiumvideo.click"]'
+        ]
+
+        for selector in gujan_iframe_selectors:
+            iframe_element = soup.select_one(selector)
+            if iframe_element:
+                src = iframe_element.get("src")
+                if src and "gujan.premiumvideo.click" in src:
+                    logger.info(f"[+] Gujan iframe bulundu: {src}")
+                    m3u8_url = await extract_gujan_m3u8(session, src)
+                    if m3u8_url:
+                        logger.info(f"[✅] Gujan'dan M3U8 başarıyla alındı!")
+                        break
+
+
+        if not m3u8_url:
+            logger.info("[*] Gujan bulunamadı, Playhouse sistemi deneniyor...")
+
+
+            iframe_selectors = [
+                'iframe[title="playhouse"]',
+                'iframe[src*="playhouse.premiumvideo.click"]',
+                'iframe[src*="premiumvideo.click/player"]'
+            ]
+
+            playhouse_url = None
+            file_id = None
+
+
+            for selector in iframe_selectors:
+                iframe_element = soup.select_one(selector)
+                if iframe_element:
+                    src = iframe_element.get("src")
+                    if src and "playhouse.premiumvideo.click" in src:
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        playhouse_url = src
+                        logger.info(f"[+] Playhouse iframe bulundu: {playhouse_url}")
+                        break
+
+
+            if not playhouse_url:
+                scripts = soup.find_all('script')
+                for script in scripts:
+                    script_content = script.get_text() or ""
+
+                    hex_pattern = re.compile(r'hexToString\w*\("([a-fA-F0-9]+)"\)')
+                    hex_matches = hex_pattern.findall(script_content)
+
+                    if hex_matches:
+                        logger.info(f"[+] Script içinde {len(hex_matches)} hex URL bulundu.")
+                        for hex_value in hex_matches:
+                            try:
+                                decoded_url = bytes.fromhex(hex_value).decode('utf-8')
+                                if decoded_url and "playhouse.premiumvideo.click" in decoded_url:
+                                    playhouse_url = decoded_url
+                                    if playhouse_url.startswith("//"):
+                                        playhouse_url = "https:" + playhouse_url
+                                    logger.info(f"[+] Hex'ten çözülen playhouse URL: {playhouse_url}")
+                                    break
+                            except Exception as e:
+                                logger.error(f"[!] Hex çözme hatası: {e}")
+
+                        if playhouse_url:
+                            break
+
+
+            if playhouse_url:
+                playhouse_match = re.search(r'playhouse\.premiumvideo\.click/player/([a-zA-Z0-9]+)', playhouse_url)
+                if playhouse_match:
+                    file_id = playhouse_match.group(1)
+                    logger.info(f"[+] Playhouse File ID bulundu: {file_id}")
+
+                    working_domain, m3u8_url = await get_correct_domain_from_playhouse(session, file_id)
+                    logger.info(f"[+] Bulunan domain: {working_domain}, M3U8: {m3u8_url}")
+
+
+            if not m3u8_url:
+                logger.info("[*] Playhouse bulunamadı, eski sistem ile deneniyor...")
+
+                iframe_selectors_fallback = [
+                    "iframe#londonIframe",
+                    "iframe[src*=premiumvideo]",
+                    "iframe[data-src*=premiumvideo]",
+                    "iframe[src*=player]",
+                    "iframe"
+                ]
+
+                for selector in iframe_selectors_fallback:
+                    iframe_element = soup.select_one(selector)
+                    if iframe_element:
+                        src = iframe_element.get("src")
+                        if not src or src == "about:blank":
+                            src = iframe_element.get("data-src")
+
+                        if src and src != "about:blank":
+                            iframe_url = fix_url(src)
+                            logger.info(f"[+] Fallback iframe URL: {iframe_url}")
+
+
+                            premium_video_match = re.search(r'premiumvideo\.click/player\.php\?file_id=([a-zA-Z0-9]+)', iframe_url)
+                            if premium_video_match:
+                                file_id = premium_video_match.group(1)
+                                logger.info(f"[+] Fallback File ID: {file_id}")
+
+                                working_domain, m3u8_url = await find_working_domain_fallback(session, file_id)
+                                break
+
+    except Exception as e:
+        logger.error(f"[!] Bölüm işleme genel hatası: {e}")
+        return episode_name, episode_num, None
+
+
+    if m3u8_url:
+        m3u8_url = create_proxy_url(m3u8_url)
+
+    return episode_name, episode_num, m3u8_url
+
+async def process_series(all_series_links, output_filename="dizifun.m3u"):
+    """Tüm dizileri tek bir dosyaya yazar"""
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=10)) as session:
+        with open(output_filename, "w", encoding="utf-8") as f:
+            f.write("#EXTM3U\n")
+
+            for series_url in all_series_links:
+                try:
+                    title, logo_url = await get_series_metadata(session, series_url)
+                    logger.info(f"\n[+] İşleniyor: {title}")
+
+                    normalized_episodes = await get_episode_links(session, series_url)
+
+                    semaphore = asyncio.Semaphore(5)
+
+                    async def process_episode(ep_url, season_num, episode_num):
+                        async with semaphore:
+                            return await extract_m3u8_from_episode(session, ep_url, season_num, episode_num)
+
+                    tasks = [process_episode(ep_url, season_num, episode_num) for ep_url, season_num, episode_num in normalized_episodes]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    for i, result in enumerate(results):
+                        if isinstance(result, Exception):
+                            logger.error(f"[!] Bölüm işleme hatası: {result}")
+                            continue
+
+                        episode_name, episode_num, m3u8_url = result
+                        if not m3u8_url:
+                            logger.warning(f"[!] m3u8 URL bulunamadı: {normalized_episodes[i][0]}")
+                            continue
+
+                        season_num = normalized_episodes[i][1]
+                        normalized_episode_num = normalized_episodes[i][2]
+                        display_name = f"{title} Sezon {season_num} Bölüm {normalized_episode_num}"
+                        tvg_id = sanitize_id(f"{title}_{season_num}_{normalized_episode_num}")
+
+                        f.write(
+                            f'#EXTINF:-1 tvg-name="{display_name}" '
+                            f'tvg-language="Turkish" tvg-country="TR" '
+                            f'tvg-id="{tvg_id}" '
+                            f'tvg-logo="{logo_url}" '
+                            f'group-title="{title}",{display_name}\n'
+                        )
+                        f.write(m3u8_url.strip() + "\n")
+                        logger.info(f"[✓] {display_name} eklendi.")
+
+                except Exception as e:
+                    logger.error(f"[!] Dizi işleme hatası: {e}")
+                    continue
+
+    logger.info(f"\n[✓] {output_filename} dosyası oluşturuldu.")
+
+async def main():
+    start_time = time.time()
+
+    series_urls = await get_series_from_homepage()
+    if not series_urls:
+        logger.error("[!] Dizi listesi boş, seçicileri kontrol et.")
+        return
+
+    await process_series(series_urls)
+
+    end_time = time.time()
+    logger.info(f"\n[✓] Tüm işlemler tamamlandı. Süre: {end_time - start_time:.2f} saniye")
+
+if __name__ == "__main__":
+    asyncio.run(main())
