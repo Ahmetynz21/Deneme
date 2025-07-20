@@ -560,26 +560,3 @@ async def extract_m3u8_from_episode(session, episode_url, season_num, episode_nu
                     if m3u8_url:
                         logger.info(f"[✅] Gujan'dan M3U8 başarıyla alındı!")
                         break
-
-
-        if not m3u8_url:
-            logger.info("[*] Gujan bulunamadı, Playhouse sistemi deneniyor...")
-
-
-            iframe_selectors = [
-                'iframe[title="playhouse"]',
-                'iframe[src*="playhouse.premiumvideo.click"]',
-                'iframe[src*="premiumvideo.click/player"]'
-            ]
-
-            playhouse_url = None
-            file_id = None
-
-
-            for selector in iframe_selectors:
-                iframe_element = soup.select_one(selector)
-                if iframe_element:
-                    src = iframe_element.get("src")
-                    if src and "playhouse.premiumvideo.click" in src:
-                        if src.startswith("//"):
-    
